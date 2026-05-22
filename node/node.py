@@ -1,481 +1,558 @@
-import time
-import json
-import hashlib
-import sqlite3
+from flask import Flask, request, jsonify
+
 import os
+import time
+import requests
 
-BLOCK_REWARD = 50
-HALVING_INTERVAL = 100
+from core.blockchain import Blockchain
+from core.wallet import Wallet
 
-class Blockchain:
+app = Flask(__name__)
 
-    def __init__(self):
+# =========================================================
+# BLOCKCHAIN
+# =========================================================
 
-        self.chain = []
+app.blockchain = Blockchain()
 
-        self.pending_transactions = []
+# =========================================================
+# PEERS
+# =========================================================
 
-        self.difficulty = 4
+peers = set()
 
-        self.block_time_target = 30
+# =========================================================
+# ROOT
+# =========================================================
 
-        self.max_supply = 21000000
+@app.route("/")
+def home():
 
-        self.db_path = "data/blockchain.db"
-
-        os.makedirs("data", exist_ok=True)
-
-        self.init_db()
-
-        self.load_chain()
-
-        self.load_mempool()
-
-        if len(self.chain) == 0:
-
-            genesis = self.create_block(
-                nonce=0,
-                previous_hash="0"
-            )
-
-            self.chain.append(genesis)
-
-            self.save_block(genesis)
-
-    # -------------------------------------------------
-    # DATABASE
-    # -------------------------------------------------
-
-    def init_db(self):
-
-        conn = sqlite3.connect(self.db_path)
-
-        c = conn.cursor()
-
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS blocks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            block_data TEXT
+    return jsonify({
+        "name": "Nethera-NTHR",
+        "status": "online",
+        "chain_height": len(
+            app.blockchain.chain
+        ),
+        "difficulty": app.blockchain.difficulty,
+        "pending_transactions": len(
+            app.blockchain.pending_transactions
         )
-        """)
+    })
 
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS mempool (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tx_data TEXT
-        )
-        """)
+# =========================================================
+# GET CHAIN
+# =========================================================
 
-        conn.commit()
-        conn.close()
+@app.route("/chain", methods=["GET"])
+def get_chain():
 
-    # -------------------------------------------------
-    # SAVE BLOCK
-    # -------------------------------------------------
+    return jsonify(
+        app.blockchain.chain
+    )
 
-    def save_block(self, block):
+# =========================================================
+# VALIDATE CHAIN
+# =========================================================
 
-        conn = sqlite3.connect(self.db_path)
+@app.route("/validate", methods=["GET"])
+def validate_chain():
 
-        c = conn.cursor()
+    valid = app.blockchain.is_chain_valid()
 
-        c.execute(
-            "INSERT INTO blocks (block_data) VALUES (?)",
-            (json.dumps(block),)
-        )
+    return jsonify({
+        "valid": valid
+    })
 
-        conn.commit()
-        conn.close()
+# =========================================================
+# BALANCE
+# =========================================================
 
-    # -------------------------------------------------
-    # LOAD CHAIN
-    # -------------------------------------------------
+@app.route("/balance/<address>", methods=["GET"])
+def balance(address):
 
-    def load_chain(self):
+    amount = app.blockchain.get_balance(
+        address
+    )
 
-        conn = sqlite3.connect(self.db_path)
+    return jsonify({
+        "address": address,
+        "balance": amount
+    })
 
-        c = conn.cursor()
+# =========================================================
+# TRANSACTION ROUTE
+# =========================================================
 
-        c.execute(
-            "SELECT block_data FROM blocks ORDER BY id ASC"
-        )
+@app.route("/tx", methods=["POST"])
+def add_transaction():
 
-        rows = c.fetchall()
+    try:
 
-        conn.close()
+        data = request.json
 
-        self.chain = []
+        # ======================================
+        # REQUIRED FIELDS
+        # ======================================
 
-        for row in rows:
+        required = [
+            "sender",
+            "receiver",
+            "amount"
+        ]
 
-            self.chain.append(
-                json.loads(row[0])
-            )
+        for field in required:
 
-    # -------------------------------------------------
-    # SAVE MEMPOOL
-    # -------------------------------------------------
+            if field not in data:
 
-    def save_mempool(self):
+                return jsonify({
+                    "error": f"Missing field: {field}"
+                }), 400
 
-        conn = sqlite3.connect(self.db_path)
+        sender = data["sender"]
 
-        c = conn.cursor()
+        receiver = data["receiver"]
 
-        c.execute("DELETE FROM mempool")
+        amount = float(data["amount"])
 
-        for tx in self.pending_transactions:
-
-            c.execute(
-                "INSERT INTO mempool (tx_data) VALUES (?)",
-                (json.dumps(tx),)
-            )
-
-        conn.commit()
-        conn.close()
-
-    # -------------------------------------------------
-    # LOAD MEMPOOL
-    # -------------------------------------------------
-
-    def load_mempool(self):
-
-        conn = sqlite3.connect(self.db_path)
-
-        c = conn.cursor()
-
-        c.execute(
-            "SELECT tx_data FROM mempool"
+        fee = float(
+            data.get("fee", 0)
         )
 
-        rows = c.fetchall()
+        timestamp = data.get(
+            "timestamp",
+            time.time()
+        )
 
-        conn.close()
+        signature = data.get(
+            "signature"
+        )
 
-        self.pending_transactions = []
+        public_key = data.get(
+            "public_key"
+        )
 
-        for row in rows:
+        # ======================================
+        # SECURITY CHECKS
+        # ======================================
 
-            self.pending_transactions.append(
-                json.loads(row[0])
-            )
+        if amount <= 0:
 
-    # -------------------------------------------------
-    # CREATE BLOCK
-    # -------------------------------------------------
+            return jsonify({
+                "error": "Invalid amount"
+            }), 400
 
-    def create_block(self, nonce, previous_hash):
+        if fee < 0:
 
-        block = {
-            "index": len(self.chain),
-            "timestamp": time.time(),
-            "transactions": self.pending_transactions,
-            "nonce": nonce,
-            "previous_hash": previous_hash
+            return jsonify({
+                "error": "Invalid fee"
+            }), 400
+
+        if sender == receiver:
+
+            return jsonify({
+                "error": "Cannot send to self"
+            }), 400
+
+        # ======================================
+        # BUILD TX
+        # ======================================
+
+        tx = {
+            "sender": sender,
+            "receiver": receiver,
+            "amount": amount,
+            "fee": fee,
+            "timestamp": timestamp
         }
 
-        block["hash"] = self.hash(block)
-
-        return block
-
-    # -------------------------------------------------
-    # HASH BLOCK
-    # -------------------------------------------------
-
-    def hash(self, block):
-
-        block_copy = dict(block)
-
-        if "hash" in block_copy:
-            del block_copy["hash"]
-
-        encoded = json.dumps(
-            block_copy,
-            sort_keys=True
-        ).encode()
-
-        return hashlib.sha256(
-            encoded
-        ).hexdigest()
-
-    # -------------------------------------------------
-    # GET LAST BLOCK
-    # -------------------------------------------------
-
-    def get_last_block(self):
-
-        return self.chain[-1]
-
-    # -------------------------------------------------
-    # PROOF OF WORK
-    # -------------------------------------------------
-
-    def proof_of_work(self, previous_nonce):
-
-        nonce = 0
-
-        target = "0" * self.difficulty
-
-        while True:
-
-            guess = f"{nonce}{previous_nonce}".encode()
-
-            guess_hash = hashlib.sha256(
-                guess
-            ).hexdigest()
-
-            if guess_hash.startswith(target):
-
-                return nonce
-
-            nonce += 1
-
-    # -------------------------------------------------
-    # CURRENT BLOCK REWARD
-    # -------------------------------------------------
-
-    def get_block_reward(self):
-
-        halvings = len(self.chain) // HALVING_INTERVAL
-
-        reward = BLOCK_REWARD / (2 ** halvings)
-
-        if reward < 0.00000001:
-            reward = 0
-
-        return reward
-
-    # -------------------------------------------------
-    # TOTAL SUPPLY
-    # -------------------------------------------------
-
-    def total_supply(self):
-
-        total = 0
-
-        for block in self.chain:
-
-            for tx in block["transactions"]:
-
-                if tx["sender"] == "network":
-
-                    total += tx["amount"]
-
-        return total
-
-    # -------------------------------------------------
-    # MINE BLOCK
-    # -------------------------------------------------
-
-    def mine_block(self, miner_address):
-
-        if len(self.pending_transactions) == 0:
-
-            return None
-
-        # -------------------------------------
-        # BLOCK REWARD + FEES
-        # -------------------------------------
-
-        reward = self.get_block_reward()
-
-        total_fees = 0
-
-        for tx in self.pending_transactions:
-
-            total_fees += tx.get("fee", 0)
-
-        reward_tx = {
-            "sender": "network",
-            "receiver": miner_address,
-            "amount": reward + total_fees,
-            "timestamp": time.time(),
-            "fee": 0,
-            "tx_hash": hashlib.sha256(
-                f"{miner_address}{time.time()}".encode()
-            ).hexdigest()
-        }
-
-        self.pending_transactions.append(
-            reward_tx
-        )
-
-        # -------------------------------------
-        # POW
-        # -------------------------------------
-
-        previous_block = self.get_last_block()
-
-        previous_nonce = previous_block["nonce"]
-
-        nonce = self.proof_of_work(
-            previous_nonce
-        )
-
-        previous_hash = previous_block["hash"]
-
-        block = self.create_block(
-            nonce,
-            previous_hash
-        )
-
-        # -------------------------------------
-        # VALIDATE HASH
-        # -------------------------------------
-
-        block_hash = self.hash(block)
-
-        if not block_hash.startswith(
-            "0" * self.difficulty
-        ):
-
-            return None
-
-        block["hash"] = block_hash
-
-        # -------------------------------------
-        # APPEND BLOCK
-        # -------------------------------------
-
-        self.chain.append(block)
-
-        self.save_block(block)
-
-        # -------------------------------------
-        # CLEAR MEMPOOL
-        # -------------------------------------
-
-        self.pending_transactions = []
-
-        self.save_mempool()
-
-        # -------------------------------------
-        # DIFFICULTY ADJUSTMENT
-        # -------------------------------------
-
-        self.adjust_difficulty()
-
-        return block
-
-    # -------------------------------------------------
-    # DIFFICULTY RETARGET
-    # -------------------------------------------------
-
-    def adjust_difficulty(self):
-
-        if len(self.chain) < 5:
-            return
-
-        latest = self.chain[-1]
-
-        prev = self.chain[-5]
-
-        actual_time = (
-            latest["timestamp"]
-            - prev["timestamp"]
-        )
-
-        expected_time = (
-            self.block_time_target * 5
-        )
-
-        if actual_time < expected_time / 2:
-
-            self.difficulty += 1
-
-        elif actual_time > expected_time * 2:
-
-            if self.difficulty > 1:
-                self.difficulty -= 1
-
-    # -------------------------------------------------
-    # BALANCE
-    # -------------------------------------------------
-
-    def get_balance(self, address):
-
-        balance = 0
-
-        for block in self.chain:
-
-            for tx in block["transactions"]:
-
-                if tx["receiver"] == address:
-
-                    balance += tx["amount"]
-
-                if tx["sender"] == address:
-
-                    balance -= (
-                        tx["amount"]
-                        + tx.get("fee", 0)
-                    )
-
-        return round(balance, 8)
-
-    # -------------------------------------------------
-    # VALIDATE CHAIN
-    # -------------------------------------------------
-
-    def is_chain_valid(self):
-
-        for i in range(1, len(self.chain)):
-
-            current = self.chain[i]
-
-            previous = self.chain[i - 1]
-
-            # HASH CHECK
-
-            recalculated = self.hash(current)
-
-            if current["hash"] != recalculated:
-
-                return False
-
-            # PREVIOUS HASH CHECK
-
-            if current["previous_hash"] != previous["hash"]:
-
-                return False
-
-            # POW CHECK
-
-            if not current["hash"].startswith(
-                "0" * self.difficulty
+        # ======================================
+        # VERIFY SIGNATURE
+        # ======================================
+
+        if sender != "network":
+
+            if not signature or not public_key:
+
+                return jsonify({
+                    "error": "Signature required"
+                }), 400
+
+            verified = (
+                Wallet.verify_transaction(
+                    tx,
+                    signature,
+                    public_key
+                )
+            )
+
+            if not verified:
+
+                return jsonify({
+                    "error":
+                    "Rejected TX: Invalid signature"
+                }), 400
+
+            derived_address = (
+                Wallet.address_from_public_key(
+                    public_key
+                )
+            )
+
+            if derived_address != sender:
+
+                return jsonify({
+                    "error":
+                    "Sender address mismatch"
+                }), 400
+
+            # ==================================
+            # BALANCE CHECK
+            # ==================================
+
+            balance = (
+                app.blockchain.get_balance(
+                    sender
+                )
+            )
+
+            pending_locked = 0
+
+            for pending in (
+                app.blockchain.pending_transactions
             ):
 
-                return False
+                if pending["sender"] == sender:
 
-        return True
+                    pending_locked += (
+                        pending["amount"]
+                        + pending.get("fee", 0)
+                    )
 
-    # -------------------------------------------------
-    # REPLACE CHAIN
-    # -------------------------------------------------
-
-    def replace_chain(self, new_chain):
-
-        if len(new_chain) <= len(self.chain):
-
-            return False
-
-        self.chain = new_chain
-
-        conn = sqlite3.connect(self.db_path)
-
-        c = conn.cursor()
-
-        c.execute("DELETE FROM blocks")
-
-        for block in self.chain:
-
-            c.execute(
-                "INSERT INTO blocks (block_data) VALUES (?)",
-                (json.dumps(block),)
+            available = (
+                balance - pending_locked
             )
 
-        conn.commit()
-        conn.close()
+            if available < (
+                amount + fee
+            ):
 
-        return True
+                return jsonify({
+                    "error":
+                    "Insufficient funds",
+                    "balance":
+                    balance,
+                    "available":
+                    available
+                }), 400
+
+        # ======================================
+        # ATTACH CRYPTO DATA
+        # ======================================
+
+        tx["signature"] = signature
+
+        tx["public_key"] = public_key
+
+        # ======================================
+        # ADD TO MEMPOOL
+        # ======================================
+
+        app.blockchain.pending_transactions.append(
+            tx
+        )
+
+        # ======================================
+        # BROADCAST TO PEERS
+        # ======================================
+
+        for peer in peers:
+
+            try:
+
+                requests.post(
+                    f"{peer}/receive_tx",
+                    json=tx,
+                    timeout=3
+                )
+
+            except:
+                pass
+
+        return jsonify({
+            "message":
+            "Transaction added",
+            "tx": tx,
+            "mempool_size":
+            len(
+                app.blockchain.pending_transactions
+            )
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+# =========================================================
+# RECEIVE TX FROM PEER
+# =========================================================
+
+@app.route("/receive_tx", methods=["POST"])
+def receive_tx():
+
+    tx = request.json
+
+    app.blockchain.pending_transactions.append(
+        tx
+    )
+
+    return jsonify({
+        "message": "TX received"
+    })
+
+# =========================================================
+# MINE BLOCK
+# =========================================================
+
+@app.route("/mine", methods=["GET"])
+def mine():
+
+    miner = request.args.get(
+        "miner",
+        "miner"
+    )
+
+    block = app.blockchain.mine_block(
+        miner
+    )
+
+    if not block:
+
+        return jsonify({
+            "message":
+            "No transactions to mine"
+        })
+
+    # ==========================================
+    # BROADCAST BLOCK
+    # ==========================================
+
+    for peer in peers:
+
+        try:
+
+            requests.post(
+                f"{peer}/receive_block",
+                json=block,
+                timeout=3
+            )
+
+        except:
+            pass
+
+    return jsonify({
+        "message": "Block mined",
+        "block": block
+    })
+
+# =========================================================
+# RECEIVE BLOCK
+# =========================================================
+
+@app.route("/receive_block", methods=["POST"])
+def receive_block():
+
+    block = request.json
+
+    last_block = (
+        app.blockchain.get_last_block()
+    )
+
+    if (
+        block["previous_hash"]
+        == last_block["hash"]
+    ):
+
+        app.blockchain.chain.append(
+            block
+        )
+
+        app.blockchain.db.save_block(
+            block
+        )
+
+        return jsonify({
+            "message":
+            "Block accepted"
+        })
+
+    return jsonify({
+        "error":
+        "Rejected block"
+    }), 400
+
+# =========================================================
+# PEER REGISTRATION
+# =========================================================
+
+@app.route("/peers", methods=["POST"])
+def add_peer():
+
+    data = request.json
+
+    node = data.get("node")
+
+    if not node:
+
+        return jsonify({
+            "error": "No node provided"
+        }), 400
+
+    peers.add(node)
+
+    return jsonify({
+        "message":
+        "Peer added",
+        "peers":
+        list(peers)
+    })
+
+# =========================================================
+# LIST PEERS
+# =========================================================
+
+@app.route("/peers", methods=["GET"])
+def get_peers():
+
+    return jsonify({
+        "peers": list(peers)
+    })
+
+# =========================================================
+# SYNC CHAIN
+# =========================================================
+
+@app.route("/sync", methods=["GET"])
+def sync():
+
+    longest_chain = (
+        app.blockchain.chain
+    )
+
+    for peer in peers:
+
+        try:
+
+            response = requests.get(
+                f"{peer}/chain",
+                timeout=5
+            )
+
+            chain = response.json()
+
+            if len(chain) > len(longest_chain):
+
+                longest_chain = chain
+
+        except:
+            pass
+
+    if (
+        longest_chain
+        != app.blockchain.chain
+    ):
+
+        app.blockchain.replace_chain(
+            longest_chain
+        )
+
+        return jsonify({
+            "message":
+            "Chain updated",
+            "length":
+            len(longest_chain)
+        })
+
+    return jsonify({
+        "message":
+        "Already synced"
+    })
+
+# =========================================================
+# SUPPLY
+# =========================================================
+
+@app.route("/supply", methods=["GET"])
+def supply():
+
+    return jsonify({
+
+        "total_supply":
+        app.blockchain.total_supply,
+
+        "max_supply":
+        app.blockchain.max_supply,
+
+        "remaining_supply":
+        round(
+            app.blockchain.max_supply
+            - app.blockchain.total_supply,
+            8
+        ),
+
+        "current_reward":
+        app.blockchain.get_block_reward(),
+
+        "halving_interval":
+        app.blockchain.halving_interval,
+
+        "height":
+        len(app.blockchain.chain)
+    })
+
+# =========================================================
+# REWARD INFO
+# =========================================================
+
+@app.route("/reward", methods=["GET"])
+def reward():
+
+    height = len(
+        app.blockchain.chain
+    )
+
+    next_halving = (
+        (
+            height
+            // app.blockchain.halving_interval
+        ) + 1
+    ) * app.blockchain.halving_interval
+
+    return jsonify({
+
+        "current_reward":
+        app.blockchain.get_block_reward(),
+
+        "block_height":
+        height,
+
+        "next_halving_at":
+        next_halving
+    })
+
+# =========================================================
+# START NODE
+# =========================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get("PORT", 5000)
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
