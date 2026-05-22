@@ -1,285 +1,481 @@
-@app.route("/tx", methods=["POST"])
-def add_transaction():
+import time
+import json
+import hashlib
+import sqlite3
+import os
 
-    try:
+BLOCK_REWARD = 50
+HALVING_INTERVAL = 100
 
-        data = request.get_json()
+class Blockchain:
 
-        if not data:
-            return jsonify({
-                "error": "Invalid JSON"
-            }), 400
+    def __init__(self):
 
-        # -----------------------------------
-        # REQUIRED FIELDS
-        # -----------------------------------
+        self.chain = []
 
-        required = [
-            "sender",
-            "receiver",
-            "amount"
-        ]
+        self.pending_transactions = []
 
-        for field in required:
+        self.difficulty = 4
 
-            if field not in data:
+        self.block_time_target = 30
 
-                return jsonify({
-                    "error": f"Missing field: {field}"
-                }), 400
+        self.max_supply = 21000000
 
-        sender = str(data["sender"]).strip()
-        receiver = str(data["receiver"]).strip()
+        self.db_path = "data/blockchain.db"
 
-        signature = data.get("signature")
-        public_key = data.get("public_key")
+        os.makedirs("data", exist_ok=True)
 
-        timestamp = data.get(
-            "timestamp",
-            time.time()
+        self.init_db()
+
+        self.load_chain()
+
+        self.load_mempool()
+
+        if len(self.chain) == 0:
+
+            genesis = self.create_block(
+                nonce=0,
+                previous_hash="0"
+            )
+
+            self.chain.append(genesis)
+
+            self.save_block(genesis)
+
+    # -------------------------------------------------
+    # DATABASE
+    # -------------------------------------------------
+
+    def init_db(self):
+
+        conn = sqlite3.connect(self.db_path)
+
+        c = conn.cursor()
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_data TEXT
+        )
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS mempool (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_data TEXT
+        )
+        """)
+
+        conn.commit()
+        conn.close()
+
+    # -------------------------------------------------
+    # SAVE BLOCK
+    # -------------------------------------------------
+
+    def save_block(self, block):
+
+        conn = sqlite3.connect(self.db_path)
+
+        c = conn.cursor()
+
+        c.execute(
+            "INSERT INTO blocks (block_data) VALUES (?)",
+            (json.dumps(block),)
         )
 
-        fee = data.get("fee", 0)
+        conn.commit()
+        conn.close()
 
-        # -----------------------------------
-        # VALIDATE NUMBERS
-        # -----------------------------------
+    # -------------------------------------------------
+    # LOAD CHAIN
+    # -------------------------------------------------
 
-        try:
+    def load_chain(self):
 
-            amount = float(data["amount"])
-            fee = float(fee)
-            timestamp = float(timestamp)
+        conn = sqlite3.connect(self.db_path)
 
-        except:
+        c = conn.cursor()
 
-            return jsonify({
-                "error": "Invalid numeric values"
-            }), 400
+        c.execute(
+            "SELECT block_data FROM blocks ORDER BY id ASC"
+        )
 
-        # -----------------------------------
-        # BASIC SECURITY
-        # -----------------------------------
+        rows = c.fetchall()
 
-        if amount <= 0:
+        conn.close()
 
-            return jsonify({
-                "error": "Amount must be positive"
-            }), 400
+        self.chain = []
 
-        if fee < 0:
+        for row in rows:
 
-            return jsonify({
-                "error": "Fee cannot be negative"
-            }), 400
+            self.chain.append(
+                json.loads(row[0])
+            )
 
-        if sender == receiver:
+    # -------------------------------------------------
+    # SAVE MEMPOOL
+    # -------------------------------------------------
 
-            return jsonify({
-                "error": "Sender and receiver cannot match"
-            }), 400
+    def save_mempool(self):
 
-        # -----------------------------------
-        # TIMESTAMP VALIDATION
-        # -----------------------------------
+        conn = sqlite3.connect(self.db_path)
 
-        now = time.time()
+        c = conn.cursor()
 
-        if abs(now - timestamp) > 300:
+        c.execute("DELETE FROM mempool")
 
-            return jsonify({
-                "error": "Transaction expired"
-            }), 400
+        for tx in self.pending_transactions:
 
-        # -----------------------------------
-        # BUILD TRANSACTION
-        # -----------------------------------
+            c.execute(
+                "INSERT INTO mempool (tx_data) VALUES (?)",
+                (json.dumps(tx),)
+            )
 
-        tx = {
-            "sender": sender,
-            "receiver": receiver,
-            "amount": amount,
-            "fee": fee,
-            "timestamp": timestamp
+        conn.commit()
+        conn.close()
+
+    # -------------------------------------------------
+    # LOAD MEMPOOL
+    # -------------------------------------------------
+
+    def load_mempool(self):
+
+        conn = sqlite3.connect(self.db_path)
+
+        c = conn.cursor()
+
+        c.execute(
+            "SELECT tx_data FROM mempool"
+        )
+
+        rows = c.fetchall()
+
+        conn.close()
+
+        self.pending_transactions = []
+
+        for row in rows:
+
+            self.pending_transactions.append(
+                json.loads(row[0])
+            )
+
+    # -------------------------------------------------
+    # CREATE BLOCK
+    # -------------------------------------------------
+
+    def create_block(self, nonce, previous_hash):
+
+        block = {
+            "index": len(self.chain),
+            "timestamp": time.time(),
+            "transactions": self.pending_transactions,
+            "nonce": nonce,
+            "previous_hash": previous_hash
         }
 
-        # -----------------------------------
-        # HASH TX
-        # -----------------------------------
+        block["hash"] = self.hash(block)
 
-        tx_string = json.dumps(
-            tx,
+        return block
+
+    # -------------------------------------------------
+    # HASH BLOCK
+    # -------------------------------------------------
+
+    def hash(self, block):
+
+        block_copy = dict(block)
+
+        if "hash" in block_copy:
+            del block_copy["hash"]
+
+        encoded = json.dumps(
+            block_copy,
             sort_keys=True
-        )
+        ).encode()
 
-        tx_hash = hashlib.sha256(
-            tx_string.encode()
+        return hashlib.sha256(
+            encoded
         ).hexdigest()
 
-        tx["tx_hash"] = tx_hash
+    # -------------------------------------------------
+    # GET LAST BLOCK
+    # -------------------------------------------------
 
-        # -----------------------------------
-        # DUPLICATE MEMPOOL CHECK
-        # -----------------------------------
+    def get_last_block(self):
 
-        for pending in app.blockchain.pending_transactions:
+        return self.chain[-1]
 
-            if pending.get("tx_hash") == tx_hash:
+    # -------------------------------------------------
+    # PROOF OF WORK
+    # -------------------------------------------------
 
-                return jsonify({
-                    "error": "Duplicate transaction"
-                }), 400
+    def proof_of_work(self, previous_nonce):
 
-        # -----------------------------------
-        # DUPLICATE CHAIN CHECK
-        # -----------------------------------
+        nonce = 0
 
-        for block in app.blockchain.chain:
+        target = "0" * self.difficulty
 
-            for existing_tx in block["transactions"]:
+        while True:
 
-                if existing_tx.get("tx_hash") == tx_hash:
+            guess = f"{nonce}{previous_nonce}".encode()
 
-                    return jsonify({
-                        "error": "Transaction already confirmed"
-                    }), 400
+            guess_hash = hashlib.sha256(
+                guess
+            ).hexdigest()
 
-        # -----------------------------------
-        # SKIP NETWORK REWARD TX
-        # -----------------------------------
+            if guess_hash.startswith(target):
 
-        if sender != "network":
+                return nonce
 
-            # -----------------------------------
-            # REQUIRE SIGNATURE
-            # -----------------------------------
+            nonce += 1
 
-            if not signature or not public_key:
+    # -------------------------------------------------
+    # CURRENT BLOCK REWARD
+    # -------------------------------------------------
 
-                return jsonify({
-                    "error": "signature/public_key required"
-                }), 400
+    def get_block_reward(self):
 
-            # -----------------------------------
-            # VERIFY SIGNATURE
-            # -----------------------------------
+        halvings = len(self.chain) // HALVING_INTERVAL
 
-            verified = Wallet.verify_transaction(
-                tx,
-                signature,
-                public_key
-            )
+        reward = BLOCK_REWARD / (2 ** halvings)
 
-            if not verified:
+        if reward < 0.00000001:
+            reward = 0
 
-                return jsonify({
-                    "error": "Rejected TX: Invalid signature"
-                }), 400
+        return reward
 
-            # -----------------------------------
-            # VERIFY ADDRESS MATCH
-            # -----------------------------------
+    # -------------------------------------------------
+    # TOTAL SUPPLY
+    # -------------------------------------------------
 
-            derived_address = Wallet.address_from_public_key(
-                public_key
-            )
+    def total_supply(self):
 
-            if derived_address != sender:
+        total = 0
 
-                return jsonify({
-                    "error": "Sender address mismatch"
-                }), 400
+        for block in self.chain:
 
-            # -----------------------------------
-            # BALANCE CHECK
-            # -----------------------------------
+            for tx in block["transactions"]:
 
-            balance = app.blockchain.get_balance(
-                sender
-            )
+                if tx["sender"] == "network":
 
-            pending_locked = 0
+                    total += tx["amount"]
 
-            for pending in app.blockchain.pending_transactions:
+        return total
 
-                if pending["sender"] == sender:
+    # -------------------------------------------------
+    # MINE BLOCK
+    # -------------------------------------------------
 
-                    pending_locked += (
-                        pending["amount"]
-                        + pending.get("fee", 0)
-                    )
+    def mine_block(self, miner_address):
 
-            spend_total = amount + fee
+        if len(self.pending_transactions) == 0:
 
-            available = balance - pending_locked
+            return None
 
-            if available < spend_total:
+        # -------------------------------------
+        # BLOCK REWARD + FEES
+        # -------------------------------------
 
-                return jsonify({
-                    "error": "Insufficient funds",
-                    "balance": balance,
-                    "pending_locked": pending_locked,
-                    "available": available
-                }), 400
+        reward = self.get_block_reward()
 
-        # -----------------------------------
-        # ATTACH CRYPTO DATA
-        # -----------------------------------
+        total_fees = 0
 
-        tx["signature"] = signature
-        tx["public_key"] = public_key
+        for tx in self.pending_transactions:
 
-        # -----------------------------------
-        # ADD TO MEMPOOL
-        # -----------------------------------
+            total_fees += tx.get("fee", 0)
 
-        app.blockchain.pending_transactions.append(
-            tx
+        reward_tx = {
+            "sender": "network",
+            "receiver": miner_address,
+            "amount": reward + total_fees,
+            "timestamp": time.time(),
+            "fee": 0,
+            "tx_hash": hashlib.sha256(
+                f"{miner_address}{time.time()}".encode()
+            ).hexdigest()
+        }
+
+        self.pending_transactions.append(
+            reward_tx
         )
 
-        # -----------------------------------
-        # SAVE MEMPOOL
-        # -----------------------------------
+        # -------------------------------------
+        # POW
+        # -------------------------------------
 
-        try:
+        previous_block = self.get_last_block()
 
-            if hasattr(app.blockchain, "save_mempool"):
+        previous_nonce = previous_block["nonce"]
 
-                app.blockchain.save_mempool()
+        nonce = self.proof_of_work(
+            previous_nonce
+        )
 
-        except Exception as e:
+        previous_hash = previous_block["hash"]
 
-            print("[MEMPOOL SAVE ERROR]", e)
+        block = self.create_block(
+            nonce,
+            previous_hash
+        )
 
-        # -----------------------------------
-        # P2P BROADCAST
-        # -----------------------------------
+        # -------------------------------------
+        # VALIDATE HASH
+        # -------------------------------------
 
-        try:
+        block_hash = self.hash(block)
 
-            if hasattr(app, "p2p"):
+        if not block_hash.startswith(
+            "0" * self.difficulty
+        ):
 
-                app.p2p.broadcast_transaction(tx)
+            return None
 
-        except Exception as e:
+        block["hash"] = block_hash
 
-            print("[P2P ERROR]", e)
+        # -------------------------------------
+        # APPEND BLOCK
+        # -------------------------------------
 
-        # -----------------------------------
-        # SUCCESS
-        # -----------------------------------
+        self.chain.append(block)
 
-        return jsonify({
-            "message": "Transaction added",
-            "tx_hash": tx_hash,
-            "mempool_size": len(
-                app.blockchain.pending_transactions
-            ),
-            "tx": tx
-        })
+        self.save_block(block)
 
-    except Exception as e:
+        # -------------------------------------
+        # CLEAR MEMPOOL
+        # -------------------------------------
 
-        return jsonify({
-            "error": str(e)
-        }), 500
+        self.pending_transactions = []
+
+        self.save_mempool()
+
+        # -------------------------------------
+        # DIFFICULTY ADJUSTMENT
+        # -------------------------------------
+
+        self.adjust_difficulty()
+
+        return block
+
+    # -------------------------------------------------
+    # DIFFICULTY RETARGET
+    # -------------------------------------------------
+
+    def adjust_difficulty(self):
+
+        if len(self.chain) < 5:
+            return
+
+        latest = self.chain[-1]
+
+        prev = self.chain[-5]
+
+        actual_time = (
+            latest["timestamp"]
+            - prev["timestamp"]
+        )
+
+        expected_time = (
+            self.block_time_target * 5
+        )
+
+        if actual_time < expected_time / 2:
+
+            self.difficulty += 1
+
+        elif actual_time > expected_time * 2:
+
+            if self.difficulty > 1:
+                self.difficulty -= 1
+
+    # -------------------------------------------------
+    # BALANCE
+    # -------------------------------------------------
+
+    def get_balance(self, address):
+
+        balance = 0
+
+        for block in self.chain:
+
+            for tx in block["transactions"]:
+
+                if tx["receiver"] == address:
+
+                    balance += tx["amount"]
+
+                if tx["sender"] == address:
+
+                    balance -= (
+                        tx["amount"]
+                        + tx.get("fee", 0)
+                    )
+
+        return round(balance, 8)
+
+    # -------------------------------------------------
+    # VALIDATE CHAIN
+    # -------------------------------------------------
+
+    def is_chain_valid(self):
+
+        for i in range(1, len(self.chain)):
+
+            current = self.chain[i]
+
+            previous = self.chain[i - 1]
+
+            # HASH CHECK
+
+            recalculated = self.hash(current)
+
+            if current["hash"] != recalculated:
+
+                return False
+
+            # PREVIOUS HASH CHECK
+
+            if current["previous_hash"] != previous["hash"]:
+
+                return False
+
+            # POW CHECK
+
+            if not current["hash"].startswith(
+                "0" * self.difficulty
+            ):
+
+                return False
+
+        return True
+
+    # -------------------------------------------------
+    # REPLACE CHAIN
+    # -------------------------------------------------
+
+    def replace_chain(self, new_chain):
+
+        if len(new_chain) <= len(self.chain):
+
+            return False
+
+        self.chain = new_chain
+
+        conn = sqlite3.connect(self.db_path)
+
+        c = conn.cursor()
+
+        c.execute("DELETE FROM blocks")
+
+        for block in self.chain:
+
+            c.execute(
+                "INSERT INTO blocks (block_data) VALUES (?)",
+                (json.dumps(block),)
+            )
+
+        conn.commit()
+        conn.close()
+
+        return True
