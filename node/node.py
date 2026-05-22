@@ -1,16 +1,30 @@
-from flask import Flask, request, jsonify
-from core.blockchain import Blockchain
+@app.route("/peers", methods=["GET"])
+def get_peers():
+    return jsonify(list(app.p2p.peers))
 
-app = Flask(__name__)
-bc = Blockchain()
 
-@app.route("/mine")
-def mine():
-    bc.mine_block()
-    return jsonify({"length": len(bc.chain)})
+@app.route("/add_peer", methods=["POST"])
+def add_peer():
+    data = request.json
 
-@app.route("/chain")
-def chain():
-    return jsonify([b.__dict__ for b in bc.chain])
+    peer = data.get("peer")
 
-app.run(host="0.0.0.0", port=5000)
+    if not peer:
+        return jsonify({"error": "Missing peer"}), 400
+
+    app.p2p.add_peer(peer)
+
+    return jsonify({
+        "message": "Peer added",
+        "peer": peer
+    })
+
+
+@app.route("/sync", methods=["GET"])
+def sync():
+    app.p2p.sync_chain()
+
+    return jsonify({
+        "message": "Chain synced",
+        "length": len(app.blockchain.chain)
+    })
