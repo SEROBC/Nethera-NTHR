@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+    <title>
+        Nethera Explorer
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="/static/css/style.css"
+    >
+
+</head>
+
+<body>
+
+    <div class="container">
+
+        <h1>
+            Nethera-NTHR Explorer
+        </h1>
+
+        <div class="stats">
+
+            <div class="card">
+                <h2>Height</h2>
+                <p id="height">0</p>
+            </div>
+
+            <div class="card">
+                <h2>Difficulty</h2>
+                <p id="difficulty">0</p>
+            </div>
+
+            <div class="card">
+                <h2>Hashrate</h2>
+                <p id="hashrate">0</p>
+            </div>
+
+            <div class="card">
+                <h2>Supply</h2>
+                <p id="supply">0</p>
+            </div>
+
+            <div class="card">
+                <h2>Peers</h2>
+                <p id="peers">0</p>
+            </div>
+
+            <div class="card">
+                <h2>Pending TXs</h2>
+                <p id="pending">0</p>
+            </div>
+
+        </div>
+
+        <h2>
+            Latest Block
+        </h2>
+
+        <div
+            class="latest"
+            id="latest"
+        ></div>
+
+        <h2>
+            Recent Blocks
+        </h2>
+
+        <table>
+
+            <thead>
+
+                <tr>
+                    <th>Height</th>
+                    <th>Hash</th>
+                    <th>Difficulty</th>
+                    <th>TXs</th>
+                    <th>Timestamp</th>
+                </tr>
+
+            </thead>
+
+            <tbody id="blocks"></tbody>
+
+        </table>
+
+    </div>
+
+    <script src="/static/js/app.js"></script>
+
+</body>
+</html>
